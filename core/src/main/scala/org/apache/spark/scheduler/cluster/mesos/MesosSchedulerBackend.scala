@@ -269,8 +269,9 @@ private[spark] class MesosSchedulerBackend(
 
       mesosTasks.foreach { case (slaveId, tasks) =>
         slaveIdToWorkerOffer.get(slaveId).foreach(o =>
-          listenerBus.post(SparkListenerExecutorAdded(slaveId,
-            new ExecutorInfo(o.host, o.cores)))
+          listenerBus.post(SparkListenerExecutorAdded(System.currentTimeMillis(), slaveId,
+            // TODO: Add support for log urls for Mesos
+            new ExecutorInfo(o.host, o.cores, Map.empty)))
         )
         d.launchTasks(Collections.singleton(slaveIdToOffer(slaveId).getId), tasks, filters)
       }
@@ -312,24 +313,17 @@ private[spark] class MesosSchedulerBackend(
       .build()
   }
 
-  /** Check whether a Mesos task state represents a finished task */
-  def isFinished(state: MesosTaskState) = {
-    state == MesosTaskState.TASK_FINISHED ||
-      state == MesosTaskState.TASK_FAILED ||
-      state == MesosTaskState.TASK_KILLED ||
-      state == MesosTaskState.TASK_LOST
-  }
-
   override def statusUpdate(d: SchedulerDriver, status: TaskStatus) {
     inClassLoader() {
       val tid = status.getTaskId.getValue.toLong
       val state = TaskState.fromMesos(status.getState)
       synchronized {
-        if (status.getState == MesosTaskState.TASK_LOST && taskIdToSlaveId.contains(tid)) {
+        if (TaskState.isFailed(TaskState.fromMesos(status.getState))
+          && taskIdToSlaveId.contains(tid)) {
           // We lost the executor on this slave, so remember that it's gone
-          removeExecutor(taskIdToSlaveId(tid))
+          removeExecutor(taskIdToSlaveId(tid), "Lost executor")
         }
-        if (isFinished(status.getState)) {
+        if (TaskState.isFinished(state)) {
           taskIdToSlaveId.remove(tid)
         }
       }
@@ -359,9 +353,9 @@ private[spark] class MesosSchedulerBackend(
   /**
    * Remove executor associated with slaveId in a thread safe manner.
    */
-  private def removeExecutor(slaveId: String) = {
+  private def removeExecutor(slaveId: String, reason: String) = {
     synchronized {
-      listenerBus.post(SparkListenerExecutorRemoved(slaveId))
+      listenerBus.post(SparkListenerExecutorRemoved(System.currentTimeMillis(), slaveId, reason))
       slaveIdsWithExecutors -= slaveId
     }
   }
@@ -369,7 +363,7 @@ private[spark] class MesosSchedulerBackend(
   private def recordSlaveLost(d: SchedulerDriver, slaveId: SlaveID, reason: ExecutorLossReason) {
     inClassLoader() {
       logInfo("Mesos slave lost: " + slaveId.getValue)
-      removeExecutor(slaveId.getValue)
+      removeExecutor(slaveId.getValue, reason.toString)
       scheduler.executorLost(slaveId.getValue, reason)
     }
   }
@@ -393,7 +387,7 @@ private[spark] class MesosSchedulerBackend(
   }
 
   // TODO: query Mesos for number of cores
-  override def defaultParallelism() = sc.conf.getInt("spark.default.parallelism", 8)
+  override def defaultParallelism(): Int = sc.conf.getInt("spark.default.parallelism", 8)
 
   override def applicationId(): String =
     Option(appId).getOrElse {

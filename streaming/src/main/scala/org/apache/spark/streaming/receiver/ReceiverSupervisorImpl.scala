@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicLong
 import scala.collection.mutable.ArrayBuffer
 import scala.concurrent.Await
 
-import akka.actor.{Actor, Props}
+import akka.actor.{ActorRef, Actor, Props}
 import akka.pattern.ask
 import com.google.common.base.Throwables
 import org.apache.hadoop.conf.Configuration
@@ -67,8 +67,12 @@ private[streaming] class ReceiverSupervisorImpl(
   private val trackerActor = {
     val ip = env.conf.get("spark.driver.host", "localhost")
     val port = env.conf.getInt("spark.driver.port", 7077)
-    val url = "akka.tcp://%s@%s:%s/user/ReceiverTracker".format(
-      SparkEnv.driverActorSystemName, ip, port)
+    val url = AkkaUtils.address(
+      AkkaUtils.protocol(env.actorSystem),
+      SparkEnv.driverActorSystemName,
+      ip,
+      port,
+      "ReceiverTracker")
     env.actorSystem.actorSelection(url)
   }
 
@@ -79,7 +83,7 @@ private[streaming] class ReceiverSupervisorImpl(
   private val actor = env.actorSystem.actorOf(
     Props(new Actor {
 
-      override def receive() = {
+      override def receive: PartialFunction[Any, Unit] = {
         case StopReceiver =>
           logInfo("Received stop signal")
           stop("Stopped by driver", None)
@@ -88,7 +92,7 @@ private[streaming] class ReceiverSupervisorImpl(
           cleanupOldBlocks(threshTime)
       }
 
-      def ref = self
+      def ref: ActorRef = self
     }), "Receiver-" + streamId + "-" + System.currentTimeMillis())
 
   /** Unique block ids if one wants to add blocks directly */
